@@ -7,6 +7,7 @@ import {
 	DiagnosticTag,
 	Logger,
 	LanguageClient,
+	Middleware,
 } from 'coc.nvim'
 import { executable } from 'coc.nvim'
 
@@ -46,15 +47,30 @@ function hackGo() {
 function hackClangd() {
 	let filterKeys: Array<string> = ['if', 'else', 'else if', 'for', 'while']
 	tryHack('clangd', (client) => {
-		client.clientOptions.middleware = {
-			provideCompletionItem: (document, position, context, token, next) => {
-				return next(document, position, context, token)!.then((result) => {
-					result.items = result.items.filter((e) => {
-						return !filterKeys.includes(e.filterText)
-					})
-					return result
+		let mw: Middleware = client.clientOptions.middleware!
+		if (!mw) {
+			return
+		}
+		let oldProvider = mw.provideCompletionItem!
+		mw!.provideCompletionItem = (document, position, context, token, next) => {
+			let filterProvider = async (document, position, context, token) => {
+				let list = await next(document, position, context, token)
+				if (!list) return []
+
+				let items = Array.isArray(list) ? list : list.items
+				items = items.filter((e) => {
+					return !filterKeys.includes(e.filterText!)
 				})
-			},
+				if (!Array.isArray(list)) {
+					list.items = items
+				}
+				return list
+			}
+			if (oldProvider) {
+				return oldProvider(document, position, context, token, filterProvider)
+			} else {
+				return filterProvider(document, position, context, token)
+			}
 		}
 	})
 }
