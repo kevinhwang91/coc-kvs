@@ -1,15 +1,18 @@
 import {
-	services,
-	workspace,
-	ExtensionContext,
-	IServiceProvider,
+	CompletionItem,
+	CompletionItemKind,
 	DiagnosticSeverity,
 	DiagnosticTag,
-	Logger,
+	executable,
+	ExtensionContext,
+	InsertTextFormat,
+	IServiceProvider,
 	LanguageClient,
+	Logger,
 	Middleware,
+	services,
+	workspace
 } from 'coc.nvim'
-import { executable } from 'coc.nvim'
 
 var log: Logger
 
@@ -45,7 +48,8 @@ function hackGo() {
 }
 
 function hackClangd() {
-	let filterKeys: Array<string> = ['if', 'else', 'else if', 'for', 'while']
+	let filterKeys: string[] = ['if', 'else', 'else if', 'for', 'while']
+	let tailRegex = /^\s*$/
 	tryHack('clangd', (client) => {
 		let mw: Middleware = client.clientOptions.middleware!
 		if (!mw) {
@@ -53,23 +57,44 @@ function hackClangd() {
 		}
 		let oldProvider = mw.provideCompletionItem!
 		mw!.provideCompletionItem = (document, position, context, token, next) => {
-			let filterProvider = async (document, position, context, token) => {
+			let kvProvider = async (document, position, context, token) => {
 				let list = await next(document, position, context, token)
-				if (!list) return []
+				if (!list) {
+					return []
+				}
 
+				let tail = (await workspace.nvim.eval(`strpart(getline('.'), col('.') - 1)`)) as string
+
+				let addSemicolon = tailRegex.test(tail)
 				let items = Array.isArray(list) ? list : list.items
-				items = items.filter((e) => {
-					return !filterKeys.includes(e.filterText!)
-				})
-				if (!Array.isArray(list)) {
-					list.items = items
+				let newItems: CompletionItem[] = []
+				for (let i = 0; i < items.length; i++) {
+					const e = items[i]
+					if (filterKeys.includes(e.filterText!)) {
+						continue
+					}
+					if (
+						addSemicolon &&
+						e.insertTextFormat == InsertTextFormat.Snippet &&
+						e.kind == CompletionItemKind.Function
+					) {
+						let textEdit = e.textEdit!
+						e.textEdit = { range: textEdit.range, newText: textEdit.newText + ';' }
+					}
+					newItems.push(e)
+				}
+				if (Array.isArray(list)) {
+					list = newItems
+				} else {
+					list.items = newItems
 				}
 				return list
 			}
+
 			if (oldProvider) {
-				return oldProvider(document, position, context, token, filterProvider)
+				return oldProvider(document, position, context, token, kvProvider)
 			} else {
-				return filterProvider(document, position, context, token)
+				return kvProvider(document, position, context, token)
 			}
 		}
 	})
