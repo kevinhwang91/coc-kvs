@@ -11,7 +11,7 @@ import {
 	Logger,
 	Middleware,
 	services,
-	workspace
+	workspace,
 } from 'coc.nvim'
 
 var log: Logger
@@ -73,13 +73,18 @@ function hackClangd() {
 					if (filterKeys.includes(e.filterText!)) {
 						continue
 					}
-					if (
-						addSemicolon &&
-						e.insertTextFormat == InsertTextFormat.Snippet &&
-						e.kind == CompletionItemKind.Function
-					) {
+					if (addSemicolon && e.insertTextFormat == InsertTextFormat.Snippet) {
 						let textEdit = e.textEdit!
-						e.textEdit = { range: textEdit.range, newText: textEdit.newText + ';' }
+						if (textEdit) {
+							let kind = e.kind
+							let newText = textEdit.newText
+							if (kind == CompletionItemKind.Function) {
+								e.textEdit = { range: textEdit.range, newText: newText + ';' }
+							} else if (kind == CompletionItemKind.Text && newText.slice(-1) == ')') {
+								// macro function
+								e.textEdit = { range: textEdit.range, newText: newText + ';' }
+							}
+						}
 					}
 					newItems.push(e)
 				}
