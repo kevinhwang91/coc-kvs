@@ -10,6 +10,7 @@ import {
 	LanguageClient,
 	Logger,
 	Middleware,
+	Range,
 	services,
 	workspace,
 } from 'coc.nvim'
@@ -32,23 +33,68 @@ function tryHack(serviceName: string, cb: (client: LanguageClient) => void) {
 
 function hackGo() {
 	tryHack('go', (client) => {
-		client.clientOptions.middleware = {
-			handleDiagnostics: (uri, diagnostics, next) => {
-				for (let diagnostic of diagnostics) {
-					let code = diagnostic.code
+		let mw: Middleware = client.clientOptions.middleware!
+		if (!mw) {
+			return
+		}
+
+		if (executable('kgo')) {
+			mw.handleDiagnostics = (uri, diagnostics, next) => {
+				for (const d of diagnostics) {
+					let code = d.code
 					if (code == 'UnusedVar' || code == 'UnusedImport') {
-						diagnostic.tags = [DiagnosticTag.Unnecessary]
-						diagnostic.severity = DiagnosticSeverity.Hint
+						d.tags = [DiagnosticTag.Unnecessary]
+						d.severity = DiagnosticSeverity.Hint
 					}
 				}
 				next(uri, diagnostics)
-			},
+			}
+		}
+		mw.provideCompletionItem = async (document, position, context, token, next) => {
+			let list = await next(document, position, context, token)
+			if (!list) {
+				return []
+			}
+
+			let float32Item: CompletionItem, float64Item: CompletionItem;
+			let items = Array.isArray(list) ? list : list.items
+			let newItems: CompletionItem[] = []
+			for (const e of items) {
+				// log.warn(e)
+				let { textEdit, label, kind, filterText } = e
+				if (textEdit) {
+					let start = textEdit.range.start
+					let prefix = document.getText(Range.create(start, position))
+					if (kind == CompletionItemKind.Keyword && label == filterText && label == prefix) {
+						continue
+					}
+					if (label == 'float32') {
+						float32Item = e
+					}
+					if (label == 'float64') {
+						float64Item = e
+					}
+				}
+				newItems.push(e)
+			}
+
+			if (float32Item! && float64Item!) {
+				float32Item.preselect = false
+				float64Item.preselect = true
+			}
+
+			if (Array.isArray(list)) {
+				list = newItems
+			} else {
+				list.items = newItems
+			}
+			return list
 		}
 	})
 }
 
 function hackClangd() {
-	let filterKeys: string[] = ['if', 'else', 'else if', 'for', 'while']
+	let filterKeys: string[] = ['if', 'else', 'else if', 'for', 'while', 'do']
 	let tailRegex = /^\s*$/
 	tryHack('clangd', (client) => {
 		let mw: Middleware = client.clientOptions.middleware!
@@ -56,7 +102,7 @@ function hackClangd() {
 			return
 		}
 		let oldProvider = mw.provideCompletionItem!
-		mw!.provideCompletionItem = (document, position, context, token, next) => {
+		mw.provideCompletionItem = (document, position, context, token, next) => {
 			let kvProvider = async (document, position, context, token) => {
 				let list = await next(document, position, context, token)
 				if (!list) {
@@ -68,16 +114,14 @@ function hackClangd() {
 				let addSemicolon = tailRegex.test(tail)
 				let items = Array.isArray(list) ? list : list.items
 				let newItems: CompletionItem[] = []
-				for (let i = 0; i < items.length; i++) {
-					const e = items[i]
-					if (filterKeys.includes(e.filterText!)) {
+				for (const e of items) {
+					let { textEdit, insertTextFormat, filterText, kind } = e
+					if (filterKeys.includes(filterText!)) {
 						continue
 					}
-					if (addSemicolon && e.insertTextFormat == InsertTextFormat.Snippet) {
-						let textEdit = e.textEdit!
+					if (addSemicolon && insertTextFormat == InsertTextFormat.Snippet) {
 						if (textEdit) {
-							let kind = e.kind
-							let newText = textEdit.newText
+							let { newText } = textEdit
 							if (kind == CompletionItemKind.Function) {
 								e.textEdit = { range: textEdit.range, newText: newText + ';' }
 							} else if (kind == CompletionItemKind.Text && newText.slice(-1) == ')') {
@@ -110,29 +154,27 @@ export async function activate(context: ExtensionContext): Promise<void> {
 	let { filetypes } = workspace
 
 	// TODO: should refactor :(
-	if (executable('kgo')) {
-		let goType = ['go', 'gomod']
-		let hit: boolean = false
-		for (const ft of filetypes) {
-			if (goType.includes(ft)) {
+	let goType = ['go', 'gomod']
+	let hit: boolean = false
+	for (const ft of filetypes) {
+		if (goType.includes(ft)) {
+			hackGo()
+			hit = true
+			break
+		}
+	}
+	if (!hit) {
+		let disposable = workspace.onDidOpenTextDocument((doc) => {
+			let { languageId } = doc
+			if (goType.includes(languageId)) {
+				disposable.dispose()
 				hackGo()
-				hit = true
-				break
 			}
-		}
-		if (!hit) {
-			let disposable = workspace.onDidOpenTextDocument((doc) => {
-				let { languageId } = doc
-				if (goType.includes(languageId)) {
-					disposable.dispose()
-					hackGo()
-				}
-			})
-		}
+		})
 	}
 
 	let cType = ['c', 'cpp']
-	let hit: boolean = false
+	hit = false
 	for (const ft of filetypes) {
 		if (cType.includes(ft)) {
 			hackClangd()
