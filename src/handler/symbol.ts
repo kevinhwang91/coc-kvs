@@ -4,22 +4,27 @@ import {
 	Neovim,
 	Range,
 	SymbolInformation,
+	Uri,
 	workspace
 } from 'coc.nvim'
 import { DocumentSymbol, SymbolKind, SymbolTag } from 'vscode-languageserver-types'
 import Handler from '.'
 import { comparePosition } from '../utils/position'
+import { byteIndex } from '../utils/strings'
 
-export interface SymbolInfo {
+export interface DocumentSymbolInfo {
 	filepath?: string
-	lnum: number
-	col: number
-	text: string
+	name: string
 	kind: string
 	level?: number
-	containerName?: string
 	range: Range
-	selectionRange?: Range
+}
+
+export interface WorkSpaceSymbolInfo {
+	filepath?: string
+	name: string
+	kind: SymbolKind
+	range: Range
 }
 
 export function getSymbolKind(kind: SymbolKind): string {
@@ -88,11 +93,10 @@ export default class Symbols {
 		log = this.handler.logger
 	}
 
-	private convertSymbols(symbols: DocumentSymbol[]): SymbolInfo[] {
-		let res: SymbolInfo[] = []
-		let arr = symbols.slice()
-		arr.forEach((s) => this.addDocumentSymbol(res, s, 0))
-		res.sort((a: SymbolInfo, b: SymbolInfo) => {
+	private convertSymbols(symbols: DocumentSymbol[]): DocumentSymbolInfo[] {
+		let res: DocumentSymbolInfo[] = []
+		symbols.forEach((s) => this.addDocumentSymbol(res, s, 0))
+		res.sort((a: DocumentSymbolInfo, b: DocumentSymbolInfo) => {
 			let aRange = a.range
 			let bRange = b.range
 			return comparePosition(aRange.start, bRange.start)
@@ -100,17 +104,13 @@ export default class Symbols {
 		return res
 	}
 
-	private addDocumentSymbol(res: SymbolInfo[], sym: DocumentSymbol, level: number): void {
-		let { name, selectionRange, kind, children, range } = sym
-		let { start } = selectionRange || range
+	private addDocumentSymbol(res: DocumentSymbolInfo[], sym: DocumentSymbol, level: number): void {
+		let { name, kind, children, range } = sym
 		res.push({
-			col: start.character + 1,
-			lnum: start.line + 1,
-			text: name,
+			name,
 			level,
 			kind: getSymbolKind(kind),
-			range,
-			selectionRange,
+			range
 		})
 		if (children && children.length) {
 			for (let sym of children) {
@@ -127,7 +127,7 @@ export default class Symbols {
 	public async getDocumentSymbols(
 		bufnr?: number,
 		kinds?: string[]
-	): Promise<SymbolInfo[] | undefined> {
+	): Promise<DocumentSymbolInfo[] | undefined> {
 		let { nvim } = workspace
 		bufnr = typeof bufnr == 'number' ? bufnr : (await nvim.buffer).id
 		let doc = workspace.getDocument(bufnr)
@@ -160,14 +160,48 @@ export default class Symbols {
 			})
 		}
 
-		let symbols: SymbolInfo[] | undefined
+		let symbols: DocumentSymbolInfo[] | undefined
 		if (res) {
 			symbols = this.convertSymbols(res)
 			if (kinds) {
 				kinds = kinds.map((k) => k.charAt(0).toUpperCase() + k.slice(1))
 				symbols = symbols.filter((s) => kinds!.includes(s.kind))
 			}
+			let lines = doc.getLines()
+			for (const sym of symbols) {
+				let { start, end } = sym.range
+				start.character = byteIndex(lines[start.line], start.character)
+				end.character = byteIndex(lines[end.line], end.character)
+			}
 		}
 		return symbols
+	}
+
+	public async getWorkspaceSymbols(input: string): Promise<SymbolInformation[]> {
+		let workspaceSymbols = await this.handler.withRequestToken('workspaceSymbols', token => {
+			// @ts-expect-error
+			return languages.getWorkspaceSymbols(input, token)
+		}, true) as SymbolInformation[]
+		return workspaceSymbols
+	}
+
+	public async fzfWorkspaceSymbolsSource(input: string, path: string): Promise<void> {
+		let workspaceSymbols = await this.handler.withRequestToken('workspaceSymbols', token => {
+			// @ts-expect-error
+			return languages.getWorkspaceSymbols(input, token)
+		}, true) as SymbolInformation[]
+		let symbols: WorkSpaceSymbolInfo[] | undefined
+		symbols = workspaceSymbols.map((s) => {
+			let { name, kind, location } = s
+			let { range, uri } = location
+			let file = Uri.parse(uri).fsPath
+			return {
+				name,
+				filepath: file,
+				kind,
+				range
+			}
+		})
+		log.error(symbols)
 	}
 }

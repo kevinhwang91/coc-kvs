@@ -7,12 +7,12 @@ import {
 	Neovim, StatusBarItem, Thenable,
 	window
 } from 'coc.nvim'
-import Fold from './fold'
+import Rename from './rename'
 import Symbols from './symbol'
 
 export default class Handler {
-	public readonly fold: Fold
 	public readonly symbols: Symbols
+	public readonly rename: Rename
 	private requestStatusItem: StatusBarItem
 	private requestTokenSource: CancellationTokenSource | undefined | null
 	private requestTimer?: NodeJS.Timer
@@ -26,8 +26,8 @@ export default class Handler {
 			}
 		}, null, this.disposables)
 
-		this.fold = new Fold(this.nvim, this)
 		this.symbols = new Symbols(this.nvim, this)
+		this.rename = new Rename(this.nvim, this)
 
 		this.disposables.push({
 			dispose: () => {

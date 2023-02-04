@@ -5,14 +5,18 @@ import {
 	CompletionTriggerKind,
 	DiagnosticSeverity,
 	DiagnosticTag,
+	events,
 	executable,
 	ExtensionContext,
 	IServiceProvider,
 	LanguageClient,
+	ListItem,
 	Logger,
 	Middleware,
+	Neovim,
 	Range,
 	services,
+	wait,
 	workspace
 } from 'coc.nvim'
 import Handler from './handler'
@@ -20,17 +24,56 @@ import Handler from './handler'
 var log: Logger
 
 async function getService(id: string): Promise<IServiceProvider> {
-	// @ts-expect-error
-	await services.waitClient(id)
-	return services.getService(id)
+	let service!: IServiceProvider
+	for (let i = 0; i < 10; i++) {
+		await wait(200)
+		service = services.getService(id)
+		if (service) {
+			break
+		}
+	}
+	return service
 }
 
-async function hackGo() {
+
+async function hackGo(nvim: Neovim) {
+	let filterKeys = [
+		'break', 'case', 'chan', 'const', 'continue', 'default', 'defer', 'else', 'fallthrough',
+		'for', 'func', 'go', 'goto', 'if', 'import', 'interface', 'map', 'package', 'range',
+		'return', 'select', 'struct', 'switch', 'type', 'var'
+	]
+	let snippetsPrefix: string[] | undefined
 	let service = await getService('go')
 	let client = service.client! as LanguageClient
 	let mw: Middleware = client.clientOptions.middleware!
 	if (!mw) {
 		return
+	}
+
+	let filetype = await nvim.eval('&filetype') as string
+
+	async function addFilterKeys() {
+		const snippets = await nvim.call('CocAction', ['listLoadItems', 'snippets']) as ListItem[] | null
+		if (!snippets) {
+			return
+		}
+		snippetsPrefix = snippets.map((item) => {
+			return item.data.prefix
+		})
+		filterKeys = [...new Set([...filterKeys, ...snippetsPrefix])]
+	}
+
+	if (filetype == 'go') {
+		addFilterKeys()
+	} else {
+		let disposable = events.on('BufEnter', async (bufnr) => {
+			if (snippetsPrefix) {
+				disposable.dispose()
+			} else if (workspace.getDocument(bufnr).filetype === 'go') {
+				disposable.dispose()
+				addFilterKeys()
+			}
+		})
 	}
 
 	if (executable('kgo')) {
@@ -52,6 +95,8 @@ async function hackGo() {
 			return []
 		}
 
+		let { triggerKind, option } = context
+
 		let float32Item: CompletionItem, float64Item: CompletionItem
 		let items = Array.isArray(list) ? list : list.items
 		let newItems: CompletionItem[] = []
@@ -60,14 +105,14 @@ async function hackGo() {
 				continue
 			}
 			log.info(e, e.textEdit.range)
-			let { label, kind, filterText, textEdit } = e
+			let { label, kind, filterText, textEdit, preselect } = e
 			let { newText, range } = textEdit
 			switch (kind) {
 				case CompletionItemKind.Keyword:
 					let start = range.start
 					let end = range.end
 					if (
-						context.triggerKind != CompletionTriggerKind.TriggerCharacter &&
+						triggerKind != CompletionTriggerKind.TriggerCharacter &&
 						start.line == end.line &&
 						start.character == end.character
 					) {
@@ -77,9 +122,7 @@ async function hackGo() {
 						label == filterText &&
 						label.startsWith(document.getText(Range.create(start, position)))
 					) {
-						if (e.preselect) {
-							e.preselect = false
-						}
+						e.preselect = undefined
 					}
 					break
 				case CompletionItemKind.Class:
@@ -100,7 +143,7 @@ async function hackGo() {
 									const e = lhs[i]
 									newLhs.push(`\${${i + 1}:${e}}`)
 								}
-								textEdit.newText = newLhs.join(', ').concat(' := ', sects[1])
+								textEdit.newText = `${newLhs.join(', ')} \${${lhs.length + 1}::=} ${sects[1]}`
 							}
 							break
 						case 'copy!':
@@ -127,16 +170,19 @@ async function hackGo() {
 					break
 			}
 
-			let ch = label.charAt(0)
-			if (ch == ch.toUpperCase()) {
-				// @ts-expect-error
-				e.score = 2.2
+			if (preselect && option) {
+				for (const k of filterKeys) {
+					if (option.input == k) {
+						e.preselect = undefined
+						break
+					}
+				}
 			}
 			newItems.push(e)
 		}
 
 		if (float32Item! && float64Item! && float32Item.preselect) {
-			float32Item.preselect = false
+			float32Item.preselect = undefined
 			float64Item.preselect = true
 		}
 
@@ -179,21 +225,19 @@ async function hackClangd() {
 		} else {
 			list.items = newItems
 		}
-		return oldProvider
-			? await oldProvider(
-				document,
-				position,
-				context,
-				token,
-				(_document, _position, _context, _token) => list
-			)
-			: list
+		return oldProvider ? await oldProvider(
+			document,
+			position,
+			context,
+			token,
+			(_document, _position, _context, _token) => list
+		) : list
 	}
 }
 
 export async function activate(context: ExtensionContext): Promise<void> {
 	log = context.logger
-	let { filetypes } = workspace
+	let { filetypes, nvim } = workspace
 	let { subscriptions } = context
 
 	// TODO: should refactor :(
@@ -201,7 +245,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
 	let hit: boolean = false
 	for (const ft of filetypes) {
 		if (goType.includes(ft)) {
-			hackGo()
+			hackGo(nvim)
 			hit = true
 			break
 		}
@@ -211,7 +255,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
 			let { languageId } = doc
 			if (goType.includes(languageId)) {
 				disposable.dispose()
-				hackGo()
+				hackGo(nvim)
 			}
 		})
 	}
@@ -237,15 +281,10 @@ export async function activate(context: ExtensionContext): Promise<void> {
 
 	const handler = new Handler(workspace.nvim, log)
 
-	subscriptions.push(
-		commands.registerCommand('kvs.symbol.docSymbols', async (bufnr, kinds) => {
-			return await handler.symbols.getDocumentSymbols(bufnr, kinds)
-		})
-	)
-
-	subscriptions.push(
-		commands.registerCommand('kvs.fold.foldingRange', async (bufnr, kind) => {
-			return await handler.fold.foldingRange(bufnr, kind)
-		})
-	)
+	subscriptions.push(commands.registerCommand('kvs.symbol.docSymbols', async (bufnr, kinds) => {
+		return await handler.symbols.getDocumentSymbols(bufnr, kinds)
+	}))
+	subscriptions.push(commands.registerCommand('kvs.rename.toQuickfixItems', async () => {
+		return await handler.rename.editStateToQuickfixItems()
+	}))
 }
