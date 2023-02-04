@@ -21,7 +21,7 @@ var log: Logger
 
 async function getService(id: string): Promise<IServiceProvider> {
 	// @ts-expect-error
-	await services.waitClient(id)
+	await services.getLanguageClient(id)
 	return services.getService(id)
 }
 
